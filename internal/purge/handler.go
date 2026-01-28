@@ -2,7 +2,6 @@ package purge
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -28,19 +27,10 @@ type Handler struct {
 
 const purgeTimestampHeader = "X-Purge-Timestamp"
 
-type purgePayload struct {
-	Title string `json:"title"`
-}
-
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	title, err := readTitle(r)
+	title, variants, err := parsePath(r.URL.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	title = strings.TrimSpace(title)
-	if title == "" {
-		http.Error(w, "title required", http.StatusBadRequest)
 		return
 	}
 	title = httpx.NormalizeTitle(title)
@@ -57,7 +47,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	variants := []string{lang.VariantZH, lang.VariantHans, lang.VariantHant}
 	for _, variant := range variants {
 		if err := h.refreshVariant(ctx, title, variant, purgeTime); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -68,22 +57,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func readTitle(r *http.Request) (string, error) {
-	if v := r.URL.Query().Get("title"); v != "" {
-		return v, nil
+func parsePath(path string) (string, []string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil, errors.New("path required")
 	}
-	if v := r.Header.Get("X-Title"); v != "" {
-		return v, nil
+	switch {
+	case strings.HasPrefix(path, "/wiki/"):
+		title := strings.TrimPrefix(path, "/wiki/")
+		if strings.TrimSpace(title) == "" {
+			return "", nil, errors.New("title required")
+		}
+		return title, []string{lang.VariantZH, lang.VariantHans, lang.VariantHant}, nil
+	case strings.HasPrefix(path, "/zh-hans/"):
+		title := strings.TrimPrefix(path, "/zh-hans/")
+		if strings.TrimSpace(title) == "" {
+			return "", nil, errors.New("title required")
+		}
+		return title, []string{lang.VariantHans}, nil
+	case strings.HasPrefix(path, "/zh-hant/"):
+		title := strings.TrimPrefix(path, "/zh-hant/")
+		if strings.TrimSpace(title) == "" {
+			return "", nil, errors.New("title required")
+		}
+		return title, []string{lang.VariantHant}, nil
+	case strings.HasPrefix(path, "/zh/"):
+		title := strings.TrimPrefix(path, "/zh/")
+		if strings.TrimSpace(title) == "" {
+			return "", nil, errors.New("title required")
+		}
+		return title, []string{lang.VariantZH}, nil
+	default:
+		return "", nil, errors.New("unsupported purge path")
 	}
-	if r.Body == nil {
-		return "", errors.New("title not found")
-	}
-	defer r.Body.Close()
-	var payload purgePayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err == nil && payload.Title != "" {
-		return payload.Title, nil
-	}
-	return "", errors.New("title not found")
 }
 
 func (h *Handler) refreshVariant(ctx context.Context, title, variant string, purgeTime time.Time) error {

@@ -42,7 +42,7 @@ INAZUMA_NGINX_PURGE_URL=http://nginx-52w \
 
 ## PURGE
 
-Inazuma accepts HTTP `PURGE` and refreshes all variants for a title.
+Inazuma accepts HTTP `PURGE` using the path to determine title and variant(s).
 
 Required header:
 
@@ -50,10 +50,11 @@ Required header:
 X-Purge-Timestamp: 2026-01-27T12:34:56Z
 ```
 
-Title sources (first match wins):
-- `title` query param
-- `X-Title` header
-- JSON body `{ "title": "..." }`
+Path rules:
+- `/wiki/Title` purges all variants
+- `/zh/Title` purges `zh`
+- `/zh-hans/Title` purges `zh-hans`
+- `/zh-hant/Title` purges `zh-hant`
 
 If the cache entry has `updated_at` later than the timestamp, the refresh is skipped.
 Non-200 (non-5xx) refresh results delete the cached object to avoid stale entries.
