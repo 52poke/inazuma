@@ -53,6 +53,7 @@ func main() {
 		Redis:      redisClient,
 		NginxPurge: cfg.NginxPurgeURL,
 		LockTTL:    time.Duration(cfg.LockTTLSeconds) * time.Second,
+		LockWait:   time.Duration(cfg.MaxLockWaitSeconds) * time.Second,
 	}
 
 	mux := http.NewServeMux()

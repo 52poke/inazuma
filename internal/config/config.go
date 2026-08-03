@@ -52,6 +52,12 @@ func Load() (Config, error) {
 	if cfg.S3Endpoint == "" || cfg.S3Bucket == "" || cfg.S3AccessKey == "" || cfg.S3SecretKey == "" {
 		return cfg, errors.New("S3 endpoint/bucket/access/secret are required")
 	}
+	if cfg.LockTTLSeconds <= 0 {
+		return cfg, errors.New("INAZUMA_LOCK_TTL_SECONDS must be greater than zero")
+	}
+	if cfg.MaxLockWaitSeconds < 0 {
+		return cfg, errors.New("INAZUMA_MAX_LOCK_WAIT_SECONDS must not be negative")
+	}
 	return cfg, nil
 }
 

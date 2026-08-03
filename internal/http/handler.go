@@ -17,12 +17,19 @@ import (
 )
 
 type Handler struct {
-	Cfg   config.Config
-	Cache cache.Store
-	MW    *mw.Client
-	Redis *redis.Client
-	Proxy *httputil.ReverseProxy
+	Cfg     config.Config
+	Cache   cache.Store
+	MW      *mw.Client
+	Redis   *redis.Client
+	Proxy   *httputil.ReverseProxy
+	tryLock tryLockFunc
 }
+
+type cacheLock interface {
+	Unlock(context.Context) error
+}
+
+type tryLockFunc func(context.Context, string, time.Duration) (cacheLock, bool, error)
 
 type upstreamResponse struct {
 	status int
@@ -31,6 +38,21 @@ type upstreamResponse struct {
 }
 
 const globalRefreshLockKey = "lock:global-refresh"
+
+var cachedResponseHeaderNames = []string{
+	"Cache-Control",
+	"Content-Language",
+	"Content-Security-Policy",
+	"Content-Security-Policy-Report-Only",
+	"Cross-Origin-Embedder-Policy",
+	"Cross-Origin-Opener-Policy",
+	"Cross-Origin-Resource-Policy",
+	"Permissions-Policy",
+	"Referrer-Policy",
+	"Strict-Transport-Security",
+	"X-Content-Type-Options",
+	"X-Frame-Options",
+}
 
 func NewHandler(cfg config.Config, store cache.Store, mwClient *mw.Client, redisClient *redis.Client) (*Handler, error) {
 	u, err := url.Parse(cfg.MediaWikiBaseURL)
@@ -48,7 +70,7 @@ func NewHandler(cfg config.Config, store cache.Store, mwClient *mw.Client, redis
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.isLoggedIn(r) {
+	if h.shouldBypassCache(r) {
 		h.Proxy.ServeHTTP(w, r)
 		return
 	}
@@ -92,6 +114,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Proxy.ServeHTTP(w, r)
 }
 
+func (h *Handler) shouldBypassCache(r *http.Request) bool {
+	if r.Header.Get("Authorization") != "" {
+		return true
+	}
+	return h.isLoggedIn(r)
+}
+
 func (h *Handler) isLoggedIn(r *http.Request) bool {
 	name := strings.TrimSpace(h.Cfg.LoggedInCookieName)
 	if name == "" {
@@ -111,7 +140,7 @@ func (h *Handler) getWithLock(ctx context.Context, key string, info RequestInfo)
 	deadline := time.Now().Add(maxWait)
 
 	for {
-		l, ok, err := lock.TryLock(ctx, h.Redis, lockKey, lockTTL)
+		l, ok, err := h.tryCacheLock(ctx, lockKey, lockTTL)
 		if err != nil {
 			return cache.Object{}, false, nil
 		}
@@ -149,13 +178,13 @@ func (h *Handler) getWithLock(ctx context.Context, key string, info RequestInfo)
 
 func (h *Handler) tryRefreshExpired(w http.ResponseWriter, r *http.Request, key string, info RequestInfo) bool {
 	lockTTL := time.Duration(h.Cfg.LockTTLSeconds) * time.Second
-	globalLock, ok, err := lock.TryLock(r.Context(), h.Redis, globalRefreshLockKey, lockTTL)
+	globalLock, ok, err := h.tryCacheLock(r.Context(), globalRefreshLockKey, lockTTL)
 	if err != nil || !ok {
 		return false
 	}
 	defer globalLock.Unlock(r.Context())
 
-	perKey, ok, err := lock.TryLock(r.Context(), h.Redis, "lock:"+key, lockTTL)
+	perKey, ok, err := h.tryCacheLock(r.Context(), "lock:"+key, lockTTL)
 	if err != nil || !ok {
 		return false
 	}
@@ -182,8 +211,16 @@ func (h *Handler) tryRefreshExpired(w http.ResponseWriter, r *http.Request, key 
 	return true
 }
 
+func (h *Handler) tryCacheLock(ctx context.Context, key string, ttl time.Duration) (cacheLock, bool, error) {
+	if h.tryLock != nil {
+		return h.tryLock(ctx, key, ttl)
+	}
+	return lock.TryLock(ctx, h.Redis, key, ttl)
+}
+
 func (h *Handler) fetchAndStore(ctx context.Context, info RequestInfo, key string) (cache.Object, *upstreamResponse, error) {
 	path := buildVariantPath(info)
+	refreshStartedAt := time.Now().UTC()
 	resp, body, err := h.MW.Fetch(ctx, path, "", http.Header{})
 	if err != nil {
 		return cache.Object{}, nil, err
@@ -200,7 +237,8 @@ func (h *Handler) fetchAndStore(ctx context.Context, info RequestInfo, key strin
 		Body:        body,
 		ContentType: resp.Header.Get("Content-Type"),
 		Encoding:    resp.Header.Get("Content-Encoding"),
-		UpdatedAt:   time.Now().UTC(),
+		Headers:     CacheResponseHeaders(resp.Header),
+		UpdatedAt:   refreshStartedAt,
 	}
 	if err := h.Cache.Put(ctx, key, obj); err != nil {
 		return cache.Object{}, nil, err
@@ -220,15 +258,40 @@ func buildVariantPath(info RequestInfo) string {
 }
 
 func writeObject(w http.ResponseWriter, obj cache.Object, cacheStatus string) {
+	for _, name := range cachedResponseHeaderNames {
+		value := obj.Headers[name]
+		if value != "" {
+			w.Header().Set(name, value)
+		}
+	}
 	if obj.ContentType != "" {
 		w.Header().Set("Content-Type", obj.ContentType)
 	}
 	if obj.Encoding != "" {
 		w.Header().Set("Content-Encoding", obj.Encoding)
 	}
+	// Variant selection is always based on Accept-Language, regardless of the
+	// headers returned by MediaWiki for its explicit variant URL.
+	w.Header().Set("Vary", "Accept-Language")
 	w.Header().Set("X-Inazuma-Cache", cacheStatus)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(obj.Body)
+}
+
+// CacheResponseHeaders returns the end-to-end response metadata that must be
+// reproduced when a cached body is served. Vary is deliberately excluded and
+// is controlled by Inazuma in writeObject.
+func CacheResponseHeaders(headers http.Header) map[string]string {
+	cached := make(map[string]string)
+	for _, name := range cachedResponseHeaderNames {
+		if value := headers.Get(name); value != "" {
+			cached[name] = value
+		}
+	}
+	if len(cached) == 0 {
+		return nil
+	}
+	return cached
 }
 
 func writeUpstream(w http.ResponseWriter, upstream *upstreamResponse) {

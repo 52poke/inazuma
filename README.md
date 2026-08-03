@@ -61,8 +61,24 @@ Non-200 (non-5xx) refresh results delete the cached object to avoid stale entrie
 
 ## Docker
 
+The latest image is published to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/52poke/inazuma:latest
 ```
-docker build -t ghcr.io/OWNER/inazuma:local .
+
+Run it with the same environment variables described above:
+
+```bash
+docker run --rm -p 8080:8080 \
+  --env-file .env \
+  ghcr.io/52poke/inazuma:latest
+```
+
+To build the image locally instead:
+
+```bash
+docker build -t ghcr.io/52poke/inazuma:local .
 ```
 
 ## Environment variables

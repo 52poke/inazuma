@@ -15,11 +15,15 @@ type Client struct {
 }
 
 func NewClient(baseURL string) *Client {
+	return NewClientWithHTTPClient(baseURL, &http.Client{
+		Timeout: 10 * time.Second,
+	})
+}
+
+func NewClientWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		http:    httpClient,
 	}
 }
 

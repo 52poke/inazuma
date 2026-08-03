@@ -22,10 +22,12 @@ type Handler struct {
 	Redis      *redis.Client
 	NginxPurge string
 	LockTTL    time.Duration
+	LockWait   time.Duration
 	HTTPClient *http.Client
 }
 
 const purgeTimestampHeader = "X-Purge-Timestamp"
+const defaultNginxPurgeTimeout = 10 * time.Second
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	title, variants, err := parsePath(r.URL.Path)
@@ -34,6 +36,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	title = httpx.NormalizeTitle(title)
+	if title == "" {
+		http.Error(w, "title required", http.StatusBadRequest)
+		return
+	}
 
 	tsHeader := strings.TrimSpace(r.Header.Get(purgeTimestampHeader))
 	if tsHeader == "" {
@@ -94,41 +100,41 @@ func parsePath(path string) (string, []string, error) {
 
 func (h *Handler) refreshVariant(ctx context.Context, title, variant string, purgeTime time.Time) error {
 	key := cache.PageKey(variant, title)
+	path := variantPath(variant, title)
 	updatedAt, err := h.Cache.UpdatedAt(ctx, key)
 	if err == nil && updatedAt.After(purgeTime) {
-		return nil
+		// The object may have been stored before an earlier Nginx purge attempt
+		// failed. Always retry the outer-cache invalidation.
+		return h.purgeNginx(ctx, path)
 	}
 	if err != nil && !errors.Is(err, cache.ErrNotFound) {
 		return err
 	}
 
 	lockKey := "lock:" + key
-	l, ok, err := lock.TryLock(ctx, h.Redis, lockKey, h.LockTTL)
+	l, err := waitForLock(ctx, h.Redis, lockKey, h.LockTTL, h.LockWait)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return nil
-	}
 	defer l.Unlock(ctx)
 
-	updatedAt, err = h.Cache.UpdatedAt(ctx, key)
-	if err == nil && updatedAt.After(purgeTime) {
-		return nil
-	}
-	if err != nil && !errors.Is(err, cache.ErrNotFound) {
-		return err
-	}
+	// Do not skip based on UpdatedAt after waiting for the lock. A previous holder
+	// may have started its fetch before the purge event.
+	return h.refreshLocked(ctx, key, path)
+}
 
-	path := variantPath(variant, title)
+func (h *Handler) refreshLocked(ctx context.Context, key, path string) error {
+	refreshStartedAt := time.Now().UTC()
 	resp, body, err := h.MW.Fetch(ctx, path, "", http.Header{})
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode < http.StatusInternalServerError {
-			_ = h.Cache.Delete(ctx, key)
-			return nil
+			if err := h.Cache.Delete(ctx, key); err != nil {
+				return err
+			}
+			return h.purgeNginx(ctx, path)
 		}
 		return errors.New("upstream non-200 response")
 	}
@@ -137,13 +143,43 @@ func (h *Handler) refreshVariant(ctx context.Context, title, variant string, pur
 		Body:        body,
 		ContentType: resp.Header.Get("Content-Type"),
 		Encoding:    resp.Header.Get("Content-Encoding"),
-		UpdatedAt:   time.Now().UTC(),
+		Headers:     httpx.CacheResponseHeaders(resp.Header),
+		UpdatedAt:   refreshStartedAt,
 	}
 	if err := h.Cache.Put(ctx, key, obj); err != nil {
 		return err
 	}
 
 	return h.purgeNginx(ctx, path)
+}
+
+func waitForLock(ctx context.Context, client *redis.Client, key string, ttl, maxWait time.Duration) (*lock.RedisLock, error) {
+	deadline := time.Now().Add(maxWait)
+	for {
+		l, ok, err := lock.TryLock(ctx, client, key, ttl)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return l, nil
+		}
+		if maxWait <= 0 || !time.Now().Before(deadline) {
+			return nil, errors.New("timed out waiting for cache refresh lock")
+		}
+
+		wait := 50 * time.Millisecond
+		if remaining := time.Until(deadline); remaining < wait {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func variantPath(variant, title string) string {
@@ -170,10 +206,7 @@ func (h *Handler) purgeNginx(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	client := h.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := h.nginxHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -183,4 +216,11 @@ func (h *Handler) purgeNginx(ctx context.Context, path string) error {
 		return errors.New("nginx purge failed")
 	}
 	return nil
+}
+
+func (h *Handler) nginxHTTPClient() *http.Client {
+	if h.HTTPClient != nil {
+		return h.HTTPClient
+	}
+	return &http.Client{Timeout: defaultNginxPurgeTimeout}
 }

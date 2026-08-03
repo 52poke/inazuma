@@ -3,7 +3,6 @@ package httpx
 import (
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 
 	"github.com/52poke/inazuma/internal/lang"
@@ -62,18 +61,20 @@ func buildCacheable(rawTitle string, variant string) RequestInfo {
 }
 
 func NormalizeTitle(raw string) string {
-	decoded, err := url.PathUnescape(raw)
-	if err != nil {
-		decoded = raw
-	}
-	decoded = strings.ReplaceAll(decoded, " ", "_")
-	decoded = path.Clean("/" + decoded)
-	decoded = strings.TrimPrefix(decoded, "/")
-	return decoded
+	// URL.Path and url.Values have already been unescaped by net/url. Unescaping
+	// here again aliases distinct titles such as "%25" and "%2525".
+	// Titles are not filesystem paths, so dot segments and repeated slashes must
+	// also be preserved rather than normalized with path.Clean.
+	return strings.ReplaceAll(raw, " ", "_")
 }
 
 func isSpecialPage(title string) bool {
-	return strings.HasPrefix(strings.ToLower(title), "special:")
+	// MediaWiki treats spaces and underscores at the start of a title as
+	// insignificant. 52Poké also configures 特殊 as an alias for the canonical
+	// Special namespace.
+	title = strings.TrimLeft(title, " _\t\r\n")
+	lower := strings.ToLower(title)
+	return strings.HasPrefix(lower, "special:") || strings.HasPrefix(lower, "特殊:")
 }
 
 func stripUTMParams(u *url.URL) (*url.URL, bool) {
@@ -90,14 +91,10 @@ func stripUTMParams(u *url.URL) (*url.URL, bool) {
 	}
 
 	if clone.Path == "/index.php" {
-		keys := make(map[string]struct{}, len(q))
-		for k := range q {
-			keys[strings.ToLower(k)] = struct{}{}
-		}
-		if len(keys) == 1 {
-			if _, ok := keys["title"]; ok {
-				return &clone, false
-			}
+		// Query parameter names are case-sensitive, and duplicate title values are
+		// ambiguous. Only one exact title parameter is safe to canonicalize.
+		if titles, ok := q["title"]; ok && len(q) == 1 && len(titles) == 1 {
+			return &clone, false
 		}
 	}
 	return &clone, true

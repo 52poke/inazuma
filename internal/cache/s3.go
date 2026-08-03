@@ -3,6 +3,8 @@ package cache
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 )
 
 const updatedAtMetaKey = "updated_at"
+const responseHeadersMetaKey = "response_headers"
 
 type S3Store struct {
 	bucket   string
@@ -52,6 +55,7 @@ func (s *S3Store) Get(ctx context.Context, key string) (Object, error) {
 		Body:        body,
 		ContentType: aws.ToString(out.ContentType),
 		Encoding:    aws.ToString(out.ContentEncoding),
+		Headers:     parseResponseHeaders(out.Metadata),
 		UpdatedAt:   parseUpdatedAt(out.Metadata),
 	}, nil
 }
@@ -74,6 +78,9 @@ func (s *S3Store) Put(ctx context.Context, key string, obj Object) error {
 	meta := map[string]string{}
 	if !obj.UpdatedAt.IsZero() {
 		meta[updatedAtMetaKey] = strconv.FormatInt(obj.UpdatedAt.Unix(), 10)
+	}
+	if encoded := encodeResponseHeaders(obj.Headers); encoded != "" {
+		meta[responseHeadersMetaKey] = encoded
 	}
 
 	input := &s3.PutObjectInput{
@@ -112,9 +119,39 @@ func parseUpdatedAt(meta map[string]string) time.Time {
 	return time.Unix(unix, 0)
 }
 
+func encodeResponseHeaders(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(headers)
+	if err != nil {
+		return ""
+	}
+	return base64.RawStdEncoding.EncodeToString(data)
+}
+
+func parseResponseHeaders(meta map[string]string) map[string]string {
+	if meta == nil || meta[responseHeadersMetaKey] == "" {
+		return nil
+	}
+	data, err := base64.RawStdEncoding.DecodeString(meta[responseHeadersMetaKey])
+	if err != nil {
+		return nil
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(data, &headers); err != nil {
+		return nil
+	}
+	return headers
+}
+
 func isNotFound(err error) bool {
 	var nsk *types.NoSuchKey
 	if errors.As(err, &nsk) {
+		return true
+	}
+	var nf *types.NotFound
+	if errors.As(err, &nf) {
 		return true
 	}
 	return false

@@ -12,6 +12,7 @@ type Object struct {
 	Body        []byte
 	ContentType string
 	Encoding    string
+	Headers     map[string]string
 	UpdatedAt   time.Time
 }
 
