@@ -96,5 +96,7 @@ docker build -t ghcr.io/52poke/inazuma:local .
 - `INAZUMA_NGINX_PURGE_URL` (optional; empty disables nginx purge)
 - `INAZUMA_LOGGED_IN_COOKIE` (default `52poke_wikiUserID`)
 - `INAZUMA_CACHE_TTL_SECONDS` (default `2592000` / 30 days)
-- `INAZUMA_LOCK_TTL_SECONDS` (default `45`)
+- `INAZUMA_PURGE_MEDIAWIKI_TIMEOUT_SECONDS` (default `40`)
+- `INAZUMA_SERVER_WRITE_TIMEOUT_SECONDS` (default `130`)
+- `INAZUMA_LOCK_TTL_SECONDS` (default `60`)
 - `INAZUMA_MAX_LOCK_WAIT_SECONDS` (default `3`)

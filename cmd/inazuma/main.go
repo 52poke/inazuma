@@ -41,6 +41,10 @@ func main() {
 	store := cache.NewS3Store(cfg.S3Bucket, s3Client)
 	redisClient := lock.NewRedisClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 	mwClient := mw.NewClient(cfg.MediaWikiBaseURL)
+	purgeMWClient := mw.NewClientWithTimeout(
+		cfg.MediaWikiBaseURL,
+		time.Duration(cfg.PurgeMediaWikiTimeoutSeconds)*time.Second,
+	)
 
 	handler, err := httpx.NewHandler(cfg, store, mwClient, redisClient)
 	if err != nil {
@@ -49,7 +53,7 @@ func main() {
 
 	purgeHandler := &purge.Handler{
 		Cache:      store,
-		MW:         mwClient,
+		MW:         purgeMWClient,
 		Redis:      redisClient,
 		NginxPurge: cfg.NginxPurgeURL,
 		LockTTL:    time.Duration(cfg.LockTTLSeconds) * time.Second,
@@ -75,7 +79,7 @@ func main() {
 		Addr:         cfg.ListenAddr,
 		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: time.Duration(cfg.ServerWriteTimeoutSeconds) * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

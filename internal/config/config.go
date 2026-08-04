@@ -7,40 +7,44 @@ import (
 )
 
 type Config struct {
-	ListenAddr         string
-	MediaWikiBaseURL   string
-	RedisAddr          string
-	RedisDB            int
-	RedisPassword      string
-	S3Endpoint         string
-	S3Region           string
-	S3Bucket           string
-	S3AccessKey        string
-	S3SecretKey        string
-	NginxPurgeURL      string
-	LoggedInCookieName string
-	CacheTTLSeconds    int
-	LockTTLSeconds     int
-	MaxLockWaitSeconds int
+	ListenAddr                   string
+	MediaWikiBaseURL             string
+	RedisAddr                    string
+	RedisDB                      int
+	RedisPassword                string
+	S3Endpoint                   string
+	S3Region                     string
+	S3Bucket                     string
+	S3AccessKey                  string
+	S3SecretKey                  string
+	NginxPurgeURL                string
+	LoggedInCookieName           string
+	CacheTTLSeconds              int
+	PurgeMediaWikiTimeoutSeconds int
+	ServerWriteTimeoutSeconds    int
+	LockTTLSeconds               int
+	MaxLockWaitSeconds           int
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		ListenAddr:         getenv("INAZUMA_LISTEN_ADDR", ":8080"),
-		MediaWikiBaseURL:   getenv("INAZUMA_MEDIAWIKI_BASE_URL", ""),
-		RedisAddr:          getenv("INAZUMA_REDIS_ADDR", ""),
-		RedisDB:            getenvInt("INAZUMA_REDIS_DB", 0),
-		RedisPassword:      os.Getenv("INAZUMA_REDIS_PASSWORD"),
-		S3Endpoint:         getenv("INAZUMA_S3_ENDPOINT", ""),
-		S3Region:           getenv("INAZUMA_S3_REGION", ""),
-		S3Bucket:           getenv("INAZUMA_S3_BUCKET", ""),
-		S3AccessKey:        os.Getenv("INAZUMA_S3_ACCESS_KEY"),
-		S3SecretKey:        os.Getenv("INAZUMA_S3_SECRET_KEY"),
-		NginxPurgeURL:      getenv("INAZUMA_NGINX_PURGE_URL", ""),
-		LoggedInCookieName: getenv("INAZUMA_LOGGED_IN_COOKIE", "52poke_wikiUserID"),
-		CacheTTLSeconds:    getenvInt("INAZUMA_CACHE_TTL_SECONDS", 2592000),
-		LockTTLSeconds:     getenvInt("INAZUMA_LOCK_TTL_SECONDS", 45),
-		MaxLockWaitSeconds: getenvInt("INAZUMA_MAX_LOCK_WAIT_SECONDS", 3),
+		ListenAddr:                   getenv("INAZUMA_LISTEN_ADDR", ":8080"),
+		MediaWikiBaseURL:             getenv("INAZUMA_MEDIAWIKI_BASE_URL", ""),
+		RedisAddr:                    getenv("INAZUMA_REDIS_ADDR", ""),
+		RedisDB:                      getenvInt("INAZUMA_REDIS_DB", 0),
+		RedisPassword:                os.Getenv("INAZUMA_REDIS_PASSWORD"),
+		S3Endpoint:                   getenv("INAZUMA_S3_ENDPOINT", ""),
+		S3Region:                     getenv("INAZUMA_S3_REGION", ""),
+		S3Bucket:                     getenv("INAZUMA_S3_BUCKET", ""),
+		S3AccessKey:                  os.Getenv("INAZUMA_S3_ACCESS_KEY"),
+		S3SecretKey:                  os.Getenv("INAZUMA_S3_SECRET_KEY"),
+		NginxPurgeURL:                getenv("INAZUMA_NGINX_PURGE_URL", ""),
+		LoggedInCookieName:           getenv("INAZUMA_LOGGED_IN_COOKIE", "52poke_wikiUserID"),
+		CacheTTLSeconds:              getenvInt("INAZUMA_CACHE_TTL_SECONDS", 2592000),
+		PurgeMediaWikiTimeoutSeconds: getenvInt("INAZUMA_PURGE_MEDIAWIKI_TIMEOUT_SECONDS", 40),
+		ServerWriteTimeoutSeconds:    getenvInt("INAZUMA_SERVER_WRITE_TIMEOUT_SECONDS", 130),
+		LockTTLSeconds:               getenvInt("INAZUMA_LOCK_TTL_SECONDS", 60),
+		MaxLockWaitSeconds:           getenvInt("INAZUMA_MAX_LOCK_WAIT_SECONDS", 3),
 	}
 
 	if cfg.MediaWikiBaseURL == "" {
@@ -54,6 +58,12 @@ func Load() (Config, error) {
 	}
 	if cfg.LockTTLSeconds <= 0 {
 		return cfg, errors.New("INAZUMA_LOCK_TTL_SECONDS must be greater than zero")
+	}
+	if cfg.PurgeMediaWikiTimeoutSeconds <= 0 {
+		return cfg, errors.New("INAZUMA_PURGE_MEDIAWIKI_TIMEOUT_SECONDS must be greater than zero")
+	}
+	if cfg.ServerWriteTimeoutSeconds <= 0 {
+		return cfg, errors.New("INAZUMA_SERVER_WRITE_TIMEOUT_SECONDS must be greater than zero")
 	}
 	if cfg.MaxLockWaitSeconds < 0 {
 		return cfg, errors.New("INAZUMA_MAX_LOCK_WAIT_SECONDS must not be negative")
