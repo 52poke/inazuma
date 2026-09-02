@@ -10,6 +10,7 @@ import (
 
 	"github.com/52poke/inazuma/internal/cache"
 	"github.com/52poke/inazuma/internal/lang"
+	"github.com/52poke/inazuma/internal/lock"
 	"github.com/52poke/inazuma/internal/mw"
 )
 
@@ -18,6 +19,10 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
+
+type testCacheLock struct{}
+
+func (*testCacheLock) Unlock(context.Context) error { return nil }
 
 type fakeStore struct {
 	updatedAt time.Time
@@ -66,6 +71,39 @@ func TestRefreshVariantRetriesNginxPurgeForNewerObject(t *testing.T) {
 	}
 	if method != "PURGE" || path != "/zh/Page" {
 		t.Fatalf("nginx request = %s %s, want PURGE /zh/Page", method, path)
+	}
+}
+
+func TestRefreshVariantUsesNextAvailableRenderCapacitySlot(t *testing.T) {
+	store := &fakeStore{}
+	var lockKeys []string
+	originCalls := 0
+	upstreamClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		originCalls++
+		return response(http.StatusOK, "fresh"), nil
+	})}
+	h := &Handler{
+		Cache:                store,
+		MW:                   mw.NewClientWithHTTPClient("http://mediawiki.test", upstreamClient),
+		LockTTL:              time.Minute,
+		MaxConcurrentRenders: 2,
+		tryLock: func(_ context.Context, key string, _ time.Duration) (cacheLock, bool, error) {
+			lockKeys = append(lockKeys, key)
+			if key == lock.RenderCapacityLockKey(0) {
+				return nil, false, nil
+			}
+			return &testCacheLock{}, true, nil
+		},
+	}
+
+	if err := h.refreshVariant(context.Background(), "Page", lang.VariantZH, time.Now()); err != nil {
+		t.Fatalf("refreshVariant: %v", err)
+	}
+	if originCalls != 1 {
+		t.Fatalf("origin calls = %d, want 1", originCalls)
+	}
+	if len(lockKeys) != 3 || lockKeys[1] != lock.RenderCapacityLockKey(0) || lockKeys[2] != lock.RenderCapacityLockKey(1) {
+		t.Fatalf("lock keys = %#v, want per-key lock followed by both render capacity slots", lockKeys)
 	}
 }
 

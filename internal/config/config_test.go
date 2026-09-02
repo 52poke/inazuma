@@ -2,7 +2,7 @@ package config
 
 import "testing"
 
-func TestLoadTimeoutDefaults(t *testing.T) {
+func TestLoadDefaults(t *testing.T) {
 	setRequiredEnvironment(t)
 
 	cfg, err := Load()
@@ -18,9 +18,12 @@ func TestLoadTimeoutDefaults(t *testing.T) {
 	if got, want := cfg.LockTTLSeconds, 60; got != want {
 		t.Errorf("LockTTLSeconds = %d, want %d", got, want)
 	}
+	if got, want := cfg.MaxConcurrentRenders, 2; got != want {
+		t.Errorf("MaxConcurrentRenders = %d, want %d", got, want)
+	}
 }
 
-func TestLoadRejectsNonPositiveTimeouts(t *testing.T) {
+func TestLoadRejectsNonPositiveValues(t *testing.T) {
 	tests := []struct {
 		name string
 		key  string
@@ -28,6 +31,7 @@ func TestLoadRejectsNonPositiveTimeouts(t *testing.T) {
 		{name: "purge MediaWiki timeout", key: "INAZUMA_PURGE_MEDIAWIKI_TIMEOUT_SECONDS"},
 		{name: "server write timeout", key: "INAZUMA_SERVER_WRITE_TIMEOUT_SECONDS"},
 		{name: "lock TTL", key: "INAZUMA_LOCK_TTL_SECONDS"},
+		{name: "max concurrent renders", key: "INAZUMA_MAX_CONCURRENT_RENDERS"},
 	}
 
 	for _, test := range tests {
@@ -41,11 +45,25 @@ func TestLoadRejectsNonPositiveTimeouts(t *testing.T) {
 	}
 }
 
+func TestLoadReadsMaxConcurrentRenders(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("INAZUMA_MAX_CONCURRENT_RENDERS", "4")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got, want := cfg.MaxConcurrentRenders, 4; got != want {
+		t.Errorf("MaxConcurrentRenders = %d, want %d", got, want)
+	}
+}
+
 func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("INAZUMA_PURGE_MEDIAWIKI_TIMEOUT_SECONDS", "")
 	t.Setenv("INAZUMA_SERVER_WRITE_TIMEOUT_SECONDS", "")
 	t.Setenv("INAZUMA_LOCK_TTL_SECONDS", "")
+	t.Setenv("INAZUMA_MAX_CONCURRENT_RENDERS", "")
 	t.Setenv("INAZUMA_MEDIAWIKI_BASE_URL", "http://mediawiki.test")
 	t.Setenv("INAZUMA_REDIS_ADDR", "redis.test:6379")
 	t.Setenv("INAZUMA_S3_ENDPOINT", "https://s3.test")

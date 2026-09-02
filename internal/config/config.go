@@ -24,6 +24,7 @@ type Config struct {
 	ServerWriteTimeoutSeconds    int
 	LockTTLSeconds               int
 	MaxLockWaitSeconds           int
+	MaxConcurrentRenders         int
 }
 
 func Load() (Config, error) {
@@ -45,6 +46,7 @@ func Load() (Config, error) {
 		ServerWriteTimeoutSeconds:    getenvInt("INAZUMA_SERVER_WRITE_TIMEOUT_SECONDS", 130),
 		LockTTLSeconds:               getenvInt("INAZUMA_LOCK_TTL_SECONDS", 60),
 		MaxLockWaitSeconds:           getenvInt("INAZUMA_MAX_LOCK_WAIT_SECONDS", 3),
+		MaxConcurrentRenders:         getenvInt("INAZUMA_MAX_CONCURRENT_RENDERS", 2),
 	}
 
 	if cfg.MediaWikiBaseURL == "" {
@@ -67,6 +69,9 @@ func Load() (Config, error) {
 	}
 	if cfg.MaxLockWaitSeconds < 0 {
 		return cfg, errors.New("INAZUMA_MAX_LOCK_WAIT_SECONDS must not be negative")
+	}
+	if cfg.MaxConcurrentRenders <= 0 {
+		return cfg, errors.New("INAZUMA_MAX_CONCURRENT_RENDERS must be greater than zero")
 	}
 	return cfg, nil
 }

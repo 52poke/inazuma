@@ -27,6 +27,7 @@ INAZUMA_S3_BUCKET=52poke-cache \
 INAZUMA_S3_ACCESS_KEY=... \
 INAZUMA_S3_SECRET_KEY=... \
 INAZUMA_NGINX_PURGE_URL=http://nginx-52w \
+INAZUMA_MAX_CONCURRENT_RENDERS=2 \
 ./inazuma
 ```
 
@@ -38,7 +39,11 @@ INAZUMA_NGINX_PURGE_URL=http://nginx-52w \
 - `/index.php?title=Title` is cacheable; any extra query params (besides `utm_*`) are not cacheable.
 - `Special:` pages are not cacheable.
 - Non-200 responses are not cached.
-- Expired cache entries are refreshed with a global lock; if unavailable, stale content is served and refreshed later.
+- Expired cache entries are served immediately and revalidated in the background using one origin-render capacity slot; if none is available, a later request retries the refresh.
+- Cold misses require both a per-page lock and one of the origin-render capacity slots. If capacity does not become available within `INAZUMA_MAX_LOCK_WAIT_SECONDS`, Inazuma returns `503 Service Unavailable` with `Retry-After`.
+- PURGE refreshes use the same origin-render capacity slots, so the limit applies across all cache-filling MediaWiki requests.
+- S3 and Redis errors fail closed for anonymous cacheable requests: an already-read stale object is served when possible; otherwise Inazuma returns a retryable 503 so Nginx can serve its stale copy.
+- If MediaWiki renders successfully but the S3 write fails, that rendered response is still returned to the current request.
 
 ## PURGE
 
@@ -100,3 +105,4 @@ docker build -t ghcr.io/52poke/inazuma:local .
 - `INAZUMA_SERVER_WRITE_TIMEOUT_SECONDS` (default `130`)
 - `INAZUMA_LOCK_TTL_SECONDS` (default `60`)
 - `INAZUMA_MAX_LOCK_WAIT_SECONDS` (default `3`)
+- `INAZUMA_MAX_CONCURRENT_RENDERS` (default `2`; use the same value on every Inazuma replica)

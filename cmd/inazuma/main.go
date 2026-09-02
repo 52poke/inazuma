@@ -52,12 +52,13 @@ func main() {
 	}
 
 	purgeHandler := &purge.Handler{
-		Cache:      store,
-		MW:         purgeMWClient,
-		Redis:      redisClient,
-		NginxPurge: cfg.NginxPurgeURL,
-		LockTTL:    time.Duration(cfg.LockTTLSeconds) * time.Second,
-		LockWait:   time.Duration(cfg.MaxLockWaitSeconds) * time.Second,
+		Cache:                store,
+		MW:                   purgeMWClient,
+		Redis:                redisClient,
+		NginxPurge:           cfg.NginxPurgeURL,
+		LockTTL:              time.Duration(cfg.LockTTLSeconds) * time.Second,
+		LockWait:             time.Duration(cfg.MaxLockWaitSeconds) * time.Second,
+		MaxConcurrentRenders: cfg.MaxConcurrentRenders,
 	}
 
 	mux := http.NewServeMux()

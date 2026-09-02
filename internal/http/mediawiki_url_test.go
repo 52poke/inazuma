@@ -93,8 +93,9 @@ func TestRealMediaWikiUnicodeURLWithFakeBackendAndStore(t *testing.T) {
 	})}
 	h := &Handler{
 		Cfg: config.Config{
-			CacheTTLSeconds: 3600,
-			LockTTLSeconds:  45,
+			CacheTTLSeconds:      3600,
+			LockTTLSeconds:       45,
+			MaxConcurrentRenders: 2,
 		},
 		Cache: store,
 		MW:    mw.NewClientWithHTTPClient("https://mediawiki.test", backend),

@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+const renderCapacityLockKey = "lock:global-refresh"
 
 type RedisLock struct {
 	client *redis.Client
@@ -36,6 +39,15 @@ func TryLock(ctx context.Context, client *redis.Client, key string, ttl time.Dur
 		return nil, false, nil
 	}
 	return &RedisLock{client: client, key: key, token: token}, true, nil
+}
+
+// RenderCapacityLockKey returns the Redis key for one MediaWiki render slot.
+// Slot zero uses the original singleton lock key for rolling-upgrade safety.
+func RenderCapacityLockKey(slot int) string {
+	if slot <= 0 {
+		return renderCapacityLockKey
+	}
+	return renderCapacityLockKey + ":" + strconv.Itoa(slot)
 }
 
 func (l *RedisLock) Unlock(ctx context.Context) error {

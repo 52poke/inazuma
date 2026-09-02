@@ -17,14 +17,22 @@ import (
 )
 
 type Handler struct {
-	Cache      cache.Store
-	MW         *mw.Client
-	Redis      *redis.Client
-	NginxPurge string
-	LockTTL    time.Duration
-	LockWait   time.Duration
-	HTTPClient *http.Client
+	Cache                cache.Store
+	MW                   *mw.Client
+	Redis                *redis.Client
+	NginxPurge           string
+	LockTTL              time.Duration
+	LockWait             time.Duration
+	MaxConcurrentRenders int
+	HTTPClient           *http.Client
+	tryLock              tryLockFunc
 }
+
+type cacheLock interface {
+	Unlock(context.Context) error
+}
+
+type tryLockFunc func(context.Context, string, time.Duration) (cacheLock, bool, error)
 
 const purgeTimestampHeader = "X-Purge-Timestamp"
 const defaultNginxPurgeTimeout = 10 * time.Second
@@ -112,7 +120,7 @@ func (h *Handler) refreshVariant(ctx context.Context, title, variant string, pur
 	}
 
 	lockKey := "lock:" + key
-	l, err := waitForLock(ctx, h.Redis, lockKey, h.LockTTL, h.LockWait)
+	l, err := h.waitForLock(ctx, lockKey)
 	if err != nil {
 		return err
 	}
@@ -120,6 +128,12 @@ func (h *Handler) refreshVariant(ctx context.Context, title, variant string, pur
 
 	// Do not skip based on UpdatedAt after waiting for the lock. A previous holder
 	// may have started its fetch before the purge event.
+	capacityLock, err := h.waitForRenderCapacity(ctx)
+	if err != nil {
+		return err
+	}
+	defer capacityLock.Unlock(ctx)
+
 	return h.refreshLocked(ctx, key, path)
 }
 
@@ -153,32 +167,69 @@ func (h *Handler) refreshLocked(ctx context.Context, key, path string) error {
 	return h.purgeNginx(ctx, path)
 }
 
-func waitForLock(ctx context.Context, client *redis.Client, key string, ttl, maxWait time.Duration) (*lock.RedisLock, error) {
-	deadline := time.Now().Add(maxWait)
+func (h *Handler) waitForLock(ctx context.Context, key string) (cacheLock, error) {
+	deadline := time.Now().Add(h.LockWait)
 	for {
-		l, ok, err := lock.TryLock(ctx, client, key, ttl)
+		l, ok, err := h.tryCacheLock(ctx, key, h.LockTTL)
 		if err != nil {
 			return nil, err
 		}
 		if ok {
 			return l, nil
 		}
-		if maxWait <= 0 || !time.Now().Before(deadline) {
+		if !waitForLockRetry(ctx, deadline, h.LockWait) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			return nil, errors.New("timed out waiting for cache refresh lock")
 		}
+	}
+}
 
-		wait := 50 * time.Millisecond
-		if remaining := time.Until(deadline); remaining < wait {
-			wait = remaining
+func (h *Handler) waitForRenderCapacity(ctx context.Context) (cacheLock, error) {
+	deadline := time.Now().Add(h.LockWait)
+	for {
+		for slot := 0; slot < h.MaxConcurrentRenders; slot++ {
+			capacityLock, ok, err := h.tryCacheLock(ctx, lock.RenderCapacityLockKey(slot), h.LockTTL)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return capacityLock, nil
+			}
 		}
-		timer := time.NewTimer(wait)
+		if !waitForLockRetry(ctx, deadline, h.LockWait) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errors.New("timed out waiting for MediaWiki render capacity")
+		}
+	}
+}
 
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+func (h *Handler) tryCacheLock(ctx context.Context, key string, ttl time.Duration) (cacheLock, bool, error) {
+	if h.tryLock != nil {
+		return h.tryLock(ctx, key, ttl)
+	}
+	return lock.TryLock(ctx, h.Redis, key, ttl)
+}
+
+func waitForLockRetry(ctx context.Context, deadline time.Time, maxWait time.Duration) bool {
+	if maxWait <= 0 || !time.Now().Before(deadline) {
+		return false
+	}
+	wait := 50 * time.Millisecond
+	if remaining := time.Until(deadline); remaining < wait {
+		wait = remaining
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
