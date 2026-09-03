@@ -3,6 +3,8 @@ package httpx
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -24,6 +26,7 @@ type Handler struct {
 	MW      *mw.Client
 	Redis   *redis.Client
 	Proxy   *httputil.ReverseProxy
+	Logger  *slog.Logger
 	tryLock tryLockFunc
 
 	refreshMu           sync.Mutex
@@ -96,11 +99,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !errors.Is(err, cache.ErrNotFound) {
+		h.logger().Error("cache read failed", "path", r.URL.Path, "error", err)
 		h.writeServiceUnavailable(w)
 		return
 	}
 
-	obj, ok, upstream := h.getWithLock(r.Context(), key, info)
+	obj, ok, upstream, err := h.getWithLock(r.Context(), key, info)
+	if err != nil {
+		h.logger().Error("request processing failed", "path", r.URL.Path, "error", err)
+		h.writeServiceUnavailable(w)
+		return
+	}
 	if ok {
 		writeObject(w, obj, "MISS")
 		return
@@ -134,7 +143,7 @@ func (h *Handler) isLoggedIn(r *http.Request) bool {
 	return cookie.Value != ""
 }
 
-func (h *Handler) getWithLock(ctx context.Context, key string, info RequestInfo) (cache.Object, bool, *upstreamResponse) {
+func (h *Handler) getWithLock(ctx context.Context, key string, info RequestInfo) (cache.Object, bool, *upstreamResponse, error) {
 	lockKey := "lock:" + key
 	lockTTL := time.Duration(h.Cfg.LockTTLSeconds) * time.Second
 	maxWait := time.Duration(h.Cfg.MaxLockWaitSeconds) * time.Second
@@ -143,7 +152,7 @@ func (h *Handler) getWithLock(ctx context.Context, key string, info RequestInfo)
 	for {
 		l, ok, err := h.tryCacheLock(ctx, lockKey, lockTTL)
 		if err != nil {
-			return cache.Object{}, false, nil
+			return cache.Object{}, false, nil, fmt.Errorf("acquire page lock: %w", err)
 		}
 		if ok {
 			return h.renderColdMiss(ctx, l, key, info, lockTTL, deadline)
@@ -151,14 +160,17 @@ func (h *Handler) getWithLock(ctx context.Context, key string, info RequestInfo)
 
 		obj, err := h.Cache.Get(ctx, key)
 		if err == nil {
-			return obj, true, nil
+			return obj, true, nil, nil
 		}
 		if !errors.Is(err, cache.ErrNotFound) {
-			return cache.Object{}, false, nil
+			return cache.Object{}, false, nil, fmt.Errorf("read cache while waiting for page lock: %w", err)
 		}
 
 		if !waitForLockRetry(ctx, deadline) {
-			return cache.Object{}, false, nil
+			if err := ctx.Err(); err != nil {
+				return cache.Object{}, false, nil, err
+			}
+			return cache.Object{}, false, nil, errors.New("timed out waiting for page lock")
 		}
 	}
 }
@@ -166,35 +178,38 @@ func (h *Handler) getWithLock(ctx context.Context, key string, info RequestInfo)
 // renderColdMiss is entered with the per-key lock held. The origin-capacity
 // slots prevent unrelated cold misses from rendering at MediaWiki without a
 // bound even though each one holds a different per-key lock.
-func (h *Handler) renderColdMiss(ctx context.Context, perKey cacheLock, key string, info RequestInfo, lockTTL time.Duration, deadline time.Time) (cache.Object, bool, *upstreamResponse) {
+func (h *Handler) renderColdMiss(ctx context.Context, perKey cacheLock, key string, info RequestInfo, lockTTL time.Duration, deadline time.Time) (cache.Object, bool, *upstreamResponse, error) {
 	defer perKey.Unlock(ctx)
 
 	obj, err := h.Cache.Get(ctx, key)
 	if err == nil {
-		return obj, true, nil
+		return obj, true, nil, nil
 	}
 	if !errors.Is(err, cache.ErrNotFound) {
-		return cache.Object{}, false, nil
+		return cache.Object{}, false, nil, fmt.Errorf("read cache after acquiring page lock: %w", err)
 	}
 
 	for {
 		capacityLock, ok, err := h.tryOriginCapacityLock(ctx, lockTTL)
 		if err != nil {
-			return cache.Object{}, false, nil
+			return cache.Object{}, false, nil, fmt.Errorf("acquire render capacity: %w", err)
 		}
 		if ok {
 			defer capacityLock.Unlock(ctx)
 			obj, upstream, err := h.fetchAndStore(ctx, info, key)
 			if err != nil {
-				return cache.Object{}, false, nil
+				return cache.Object{}, false, nil, fmt.Errorf("fetch origin: %w", err)
 			}
 			if upstream != nil {
-				return cache.Object{}, false, upstream
+				return cache.Object{}, false, upstream, nil
 			}
-			return obj, true, nil
+			return obj, true, nil, nil
 		}
 		if !waitForLockRetry(ctx, deadline) {
-			return cache.Object{}, false, nil
+			if err := ctx.Err(); err != nil {
+				return cache.Object{}, false, nil, err
+			}
+			return cache.Object{}, false, nil, errors.New("timed out waiting for render capacity")
 		}
 	}
 }
@@ -230,29 +245,51 @@ func (h *Handler) refreshExpiredAsync(key string, info RequestInfo) {
 		defer cancel()
 
 		perKey, ok, err := h.tryCacheLock(ctx, "lock:"+key, lockTTL)
-		if err != nil || !ok {
+		if err != nil {
+			h.logger().Error("background refresh lock failed", "key", key, "error", err)
+			return
+		}
+		if !ok {
 			return
 		}
 		defer unlockInBackground(perKey)
 
 		current, err := h.Cache.Get(ctx, key)
-		if err != nil || !isExpired(current.UpdatedAt, h.Cfg.CacheTTLSeconds) {
+		if err != nil {
+			if !errors.Is(err, cache.ErrNotFound) {
+				h.logger().Error("background refresh cache read failed", "key", key, "error", err)
+			}
+			return
+		}
+		if !isExpired(current.UpdatedAt, h.Cfg.CacheTTLSeconds) {
 			return
 		}
 
 		capacityLock, ok, err := h.tryOriginCapacityLock(ctx, lockTTL)
-		if err != nil || !ok {
+		if err != nil {
+			h.logger().Error("background refresh capacity lock failed", "key", key, "error", err)
+			return
+		}
+		if !ok {
 			return
 		}
 		defer unlockInBackground(capacityLock)
 
 		_, upstream, err := h.fetchAndStore(ctx, info, key)
-		if err != nil || upstream == nil {
+		if err != nil {
+			h.logger().Error("background refresh failed", "key", key, "error", err)
+			return
+		}
+		if upstream == nil {
 			return
 		}
 		if upstream.status < http.StatusInternalServerError {
-			_ = h.Cache.Delete(ctx, key)
+			if err := h.Cache.Delete(ctx, key); err != nil {
+				h.logger().Error("background refresh cache delete failed", "key", key, "error", err)
+			}
+			return
 		}
+		h.logger().Error("background refresh origin error", "key", key, "status", upstream.status)
 	}()
 }
 
@@ -327,9 +364,17 @@ func (h *Handler) fetchAndStore(ctx context.Context, info RequestInfo, key strin
 	if err := h.Cache.Put(ctx, key, obj); err != nil {
 		// The origin work has already completed. Serving this in-memory response
 		// avoids a second render for the same request when object storage is down.
+		h.logger().Error("cache write failed", "key", key, "error", err)
 		return obj, nil, nil
 	}
 	return obj, nil, nil
+}
+
+func (h *Handler) logger() *slog.Logger {
+	if h.Logger != nil {
+		return h.Logger
+	}
+	return slog.Default()
 }
 
 func (h *Handler) writeServiceUnavailable(w http.ResponseWriter) {

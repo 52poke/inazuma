@@ -3,6 +3,7 @@ package purge
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,6 +26,7 @@ type Handler struct {
 	LockWait             time.Duration
 	MaxConcurrentRenders int
 	HTTPClient           *http.Client
+	Logger               *slog.Logger
 	tryLock              tryLockFunc
 }
 
@@ -63,12 +65,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	for _, variant := range variants {
 		if err := h.refreshVariant(ctx, title, variant, purgeTime); err != nil {
+			h.logger().Error("purge failed", "path", r.URL.Path, "variant", variant, "error", err)
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) logger() *slog.Logger {
+	if h.Logger != nil {
+		return h.Logger
+	}
+	return slog.Default()
 }
 
 func parsePath(path string) (string, []string, error) {

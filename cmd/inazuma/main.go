@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -78,7 +79,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         cfg.ListenAddr,
-		Handler:      mux,
+		Handler:      httpx.LogRequests(slog.Default(), mux),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: time.Duration(cfg.ServerWriteTimeoutSeconds) * time.Second,
 		IdleTimeout:  60 * time.Second,
