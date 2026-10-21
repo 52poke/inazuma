@@ -16,8 +16,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
-const updatedAtMetaKey = "updated_at"
-const responseHeadersMetaKey = "response_headers"
+const (
+	updatedAtMetaKey       = "updated_at"
+	responseHeadersMetaKey = "response_headers"
+)
 
 type S3Store struct {
 	bucket   string
@@ -84,12 +86,14 @@ func (s *S3Store) Put(ctx context.Context, key string, obj Object) error {
 	}
 
 	input := &s3.PutObjectInput{
-		Bucket:          aws.String(s.bucket),
-		Key:             aws.String(key),
-		Body:            bytes.NewReader(obj.Body),
-		ContentType:     aws.String(obj.ContentType),
-		ContentEncoding: aws.String(obj.Encoding),
-		Metadata:        meta,
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(obj.Body),
+		ContentType: aws.String(obj.ContentType),
+		Metadata:    meta,
+	}
+	if obj.Encoding != "" {
+		input.ContentEncoding = aws.String(obj.Encoding)
 	}
 
 	_, err := s.uploader.Upload(ctx, input)
